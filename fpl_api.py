@@ -55,3 +55,12 @@ def get_fixtures():
         return response.json()
     except requests.exceptions.RequestException as e:
         return None
+def get_entry_history(entry_id):
+    """Fetches the full gameweek-by-gameweek history and chip usage for a manager."""
+    url = f"{BASE_URL}/entry/{entry_id}/history/"
+    try:
+        response = requests.get(url, headers=HEADERS)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        return None

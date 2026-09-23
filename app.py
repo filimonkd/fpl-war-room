@@ -23,6 +23,18 @@ st.markdown("""
     .gw-banner { background: linear-gradient(90deg, #38003c, #00ff87); color: white; padding: 15px; border-radius: 10px; text-align: center; margin-bottom: 20px; font-size: 1.2rem; font-weight: bold;}
     .metric-positive { color: #008000; font-weight: bold; }
     .metric-negative { color: #ff0000; font-weight: bold; }
+        /* Rival Radar Cards */
+    .radar-card { 
+        background-color: white; padding: 20px; border-radius: 12px; 
+        box-shadow: 0 4px 10px rgba(0,0,0,0.08); margin-bottom: 15px; 
+        border-left: 5px solid #38003c; 
+    }
+    .radar-card.me { border-left-color: #00ff87; background: linear-gradient(135deg, #ffffff 0%, #f0fff4 100%); }
+    .radar-card h3 { margin-top: 0; color: #38003c; font-size: 1.2rem; }
+    .radar-stat { display: flex; justify-content: space-between; margin: 8px 0; font-size: 0.95rem; }
+    .radar-stat span:last-child { font-weight: bold; color: #333; }
+    .chip-used { color: #ccc; text-decoration: line-through; margin-right: 10px; }
+    .chip-available { color: #00ff87; font-weight: bold; margin-right: 10px; text-shadow: 1px 1px 2px rgba(0,0,0,0.2); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -225,12 +237,108 @@ def build_spy_data(standings_df, boot_data, my_name):
     progress_bar.empty()
     return spy_data, my_entry_id
 
+def build_rival_radar(standings_df, boot_data, my_name):
+    """Calculates deep psychological and statistical data on your closest rivals."""
+    if standings_df.empty or not boot_data: return None, []
+    
+    current_gw, _ = get_current_and_next_gw(boot_data)
+    
+    # 1. Find my index and identify closest rivals
+    my_idx = -1
+    for idx, row in standings_df.iterrows():
+        if my_name.lower() in row['Manager'].lower():
+            my_idx = idx
+            break
+            
+    if my_idx == -1: return None, []
+    
+    # Get the rival above (lower index) and below (higher index)
+    rival_indices = []
+    if my_idx > 0: rival_indices.append(my_idx - 1) # Rival above
+    if my_idx < len(standings_df) - 1: rival_indices.append(my_idx + 1) # Rival below
+    
+    targets = [my_idx] + rival_indices
+    
+    radar_data = []
+    progress_bar = st.progress(0)
+    
+    for i, idx in enumerate(targets):
+        row = standings_df.iloc[idx]
+        entry_id = row['Entry ID']
+        is_me = (idx == my_idx)
+        
+        progress_bar.progress((i + 1) / len(targets))
+        
+        # Fetch deep data
+        history = fpl_api.get_entry_history(entry_id)
+        picks = fpl_api.get_entry_picks(entry_id, current_gw)
+        
+        if not history or not picks: continue
+        
+        # --- CALCULATIONS ---
+        
+        # 1. Form (Last 3 GWs average)
+        gw_history = sorted(history['current'], key=lambda x: x['event'], reverse=True)
+        last_3 = gw_history[:3]
+        form = round(sum(g['total_points'] for g in last_3) / len(last_3), 1) if last_3 else 0
+        
+        # 2. Transfer Hits (Total points lost)
+        hits = sum(g.get('event_transfers_cost', 0) for g in history['current'])
+        
+        # 3. Chips Remaining
+        all_chips = {'wildcard': 'WC', 'bboost': 'BB', '3xc': 'TC', 'freehit': 'FH'}
+        used_chips = [c['name'] for c in history.get('chips', [])]
+        remaining_chips = {k: v for k, v in all_chips.items() if k not in used_chips}
+        
+        # 4. Current Threat (Captain & Active Chip)
+        starting_11 = [p for p in picks['picks'] if p['position'] <= 11]
+        captain = next((p['element'] for p in starting_11 if p['is_captain']), None)
+        captain_name = "None"
+        if captain:
+            captain_name = next((p['web_name'] for p in boot_data['elements'] if p['id'] == captain), "Unknown")
+            
+        active_chip_raw = picks.get('active_chip', None)
+        active_chip = all_chips.get(active_chip_raw, "None") if active_chip_raw else "None"
+        
+        radar_data.append({
+            'Manager': row['Manager'],
+            'Team': row['Team Name'],
+            'Is Me': is_me,
+            'Total Pts': row['Total Points'],
+            'Form (Last 3)': form,
+            'Hits Taken': hits,
+            'Remaining Chips': remaining_chips,
+            'Captain': captain_name,
+            'Active Chip': active_chip,
+            'GW History': gw_history # Keep for H2H calculation
+        })
+        time.sleep(0.2)
+        
+    progress_bar.empty()
+    
+    # 5. Calculate Head-to-Head (H2H) for rivals against ME
+    my_data = next((r for r in radar_data if r['Is Me']), None)
+    if my_data:
+        for rival in radar_data:
+            if not rival['Is Me']:
+                wins, losses, draws = 0, 0, 0
+                for my_gw in my_data['GW History']:
+                    rival_gw = next((r for r in rival['GW History'] if r['event'] == my_gw['event']), None)
+                    if rival_gw:
+                        if my_gw['total_points'] > rival_gw['total_points']: wins += 1
+                        elif my_gw['total_points'] < rival_gw['total_points']: losses += 1
+                        else: draws += 1
+                rival['H2H'] = f"{wins}W - {losses}L - {draws}D"
+            else:
+                rival['H2H'] = "—"
+                
+    return my_data, [r for r in radar_data if not r['Is Me']]
 # --- UI LAYOUT ---
 st.markdown("<h1 style='text-align: center;'>⚽ FPL War Room</h1>", unsafe_allow_html=True)
 st.markdown("---")
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    f"🏆 {league_1_name}", f"🏆 {league_2_name}", "🕵️ Spy vs Me", "🧠 Strategy Lab"
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    f"🏆 {league_1_name}", f"🏆 {league_2_name}", "🕵️ Spy vs Me", "🧠 Strategy", "🎯 Radar"
 ])
 
 # --- TAB 1 & 2: LEADERBOARDS ---
@@ -379,3 +487,57 @@ with tab4:
 
 Make your transfers and may the best team win! ⚽"""
             st.code(summary_text, language="markdown")
+# --- TAB 5: RIVAL RADAR ---
+with tab5:
+    st.subheader("🎯 Rival Radar")
+    st.markdown("Deep psychological and statistical analysis of the managers directly above and below you.")
+    
+    group_for_radar = st.radio("Select Group:", [league_1_name, league_2_name], horizontal=True, key="radar_group", label_visibility="collapsed")
+    
+    if st.button("📡 Scan Rivals", use_container_width=True, type="primary"):
+        standings_df = process_standings(l1_data) if group_for_radar == league_1_name else process_standings(l2_data)
+        
+        if not standings_df.empty and bootstrap:
+            with st.spinner("Analyzing rival DNA..."):
+                my_radar, rivals_radar = build_rival_radar(standings_df, bootstrap, my_name)
+                
+            if not my_radar:
+                st.error(f"Could not find '{my_name}' in this group.")
+            else:
+                # Render My Card
+                st.markdown(f"### 👤 Your Profile ({my_name})")
+                chips_html = " ".join([f"<span class='chip-available'>{v}</span>" for k, v in my_radar['Remaining Chips'].items()] + 
+                                      [f"<span class='chip-used'>{v}</span>" for k, v in {'wildcard': 'WC', 'bboost': 'BB', '3xc': 'TC', 'freehit': 'FH'}.items() if k not in my_radar['Remaining Chips']])
+                
+                st.markdown(f"""
+                <div class="radar-card me">
+                    <h3>{my_radar['Manager']} <span style="color:#00ff87;">(YOU)</span></h3>
+                    <div class="radar-stat"><span>Total Points:</span> <span>{my_radar['Total Pts']}</span></div>
+                    <div class="radar-stat"><span>Form (Last 3 GW Avg):</span> <span>{my_radar['Form (Last 3)']}</span></div>
+                    <div class="radar-stat"><span>Transfer Hits Taken:</span> <span style="color:{'red' if my_radar['Hits Taken'] > 0 else 'green'};">-{my_radar['Hits Taken']} pts</span></div>
+                    <div class="radar-stat"><span>This Week Captain:</span> <span>{my_radar['Captain']}</span></div>
+                    <div class="radar-stat"><span>Chips Remaining:</span> <span>{chips_html}</span></div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Render Rivals Cards
+                for rival in rivals_radar:
+                    chips_html_r = " ".join([f"<span class='chip-available'>{v}</span>" for k, v in rival['Remaining Chips'].items()] + 
+                                            [f"<span class='chip-used'>{v}</span>" for k, v in {'wildcard': 'WC', 'bboost': 'BB', '3xc': 'TC', 'freehit': 'FH'}.items() if k not in rival['Remaining Chips']])
+                    
+                    threat_level = "🔥 HIGH" if rival['Active Chip'] != "None" or rival['Form (Last 3)'] > my_radar['Form (Last 3)'] + 10 else "🟢 NORMAL"
+                    
+                    st.markdown(f"### ⚔️ Rival Profile")
+                    st.markdown(f"""
+                    <div class="radar-card">
+                        <h3>{rival['Manager']} ({rival['Team']})</h3>
+                        <div class="radar-stat"><span>Total Points:</span> <span>{rival['Total Pts']} ({rival['Total Pts'] - my_radar['Total Pts']:+d} vs you)</span></div>
+                        <div class="radar-stat"><span>Form (Last 3 GW Avg):</span> <span>{rival['Form (Last 3)']}</span></div>
+                        <div class="radar-stat"><span>Transfer Hits Taken:</span> <span style="color:{'red' if rival['Hits Taken'] > 0 else 'green'};">-{rival['Hits Taken']} pts</span></div>
+                        <div class="radar-stat"><span>Head-to-Head Record:</span> <span>{rival['H2H']}</span></div>
+                        <div class="radar-stat"><span>This Week Captain:</span> <span>{rival['Captain']}</span></div>
+                        <div class="radar-stat"><span>Active Chip:</span> <span style="color:{'red' if rival['Active Chip'] != 'None' else 'inherit'};">{rival['Active Chip']}</span></div>
+                        <div class="radar-stat"><span>Chips Remaining:</span> <span>{chips_html_r}</span></div>
+                        <div class="radar-stat"><span>Threat Level:</span> <span>{threat_level}</span></div>
+                    </div>
+                    """, unsafe_allow_html=True)
